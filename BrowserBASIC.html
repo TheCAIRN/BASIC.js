@@ -1,0 +1,752 @@
+<!DOCTYPE HTML>
+<HTML>
+<HEAD>
+<TITLE>Browser BASIC Demo</TITLE>
+</HEAD>
+<BODY>
+<SCRIPT type="text/javascript" lang="javascript">
+/*
+GW BASIC User's Manual: http://www.antonis.de/qbebooks/gwbasman/index2.html
+
+ROADMAP:
+01. Allow assignment of expressions
+02. Remove the parentheses requirement for expressions
+03. Handle IF/THEN
+04. Handle GOTO
+05. Move from TextArea to Label or Canvas.
+06. Handle PRINT@ or LOCATE
+07. Handle FOR/NEXT
+08. Handle INPUT, INKEY$
+09. Handle built in functions
+10. Handle GOSUB/RETURN
+11. Handle DATA, DIM, READ, RESTORE
+12. Handle ON statements
+13. Handle WHILE/WEND
+14. Set up LOAD/SAVE mechanism (may be server or platform specific)
+15. Graphics
+16. Sound
+17. Limited file support
+18. Emulate PEEK/POKE/IOCTL
+19. URL extensions
+20. Print
+21. Networking extensions
+22. Anything else I can think of
+*/
+var runMode=0; // 0 for interactive, 1 for scripted
+var currentCode=new Array();
+var dataObjects=new Array();
+var instructionPointer=0;
+var lastInstructionLine=-1;
+var highestLineNumber=0;
+var instructionStack=new Array();
+var lastError="";
+var lastRandom=Math.random();
+var inputVar="";
+var buffer="";
+var emitCRLF=true;
+
+function trim(stringToTrim) {
+	// From http://www.somacon.com/p355.php
+	return stringToTrim.replace(/^\s+|\s+$/g,"");
+}
+function isNumber(n) {
+	// From http://stackoverflow.com/questions/18082/validate-numbers-in-javascript-isnumeric
+	return !isNaN(parseFloat(n)) && isFinite(n);
+}
+function evalExp(exp) {
+	// Start off with some quick optimizations
+	if (!(exp instanceof Array)) return exp;
+	if (exp.length==3 && exp[0]=="<<LPAREN>>" && exp[2]=="<<RPAREN>>" && isNumber(exp[1])) return exp[1];
+	if (exp.length==1) {
+		if (exp[0]=="PI") return Math.PI;
+		if (exp[0]=="RND") {
+			lastRandom=Math.random();
+			return lastRandom;
+		}
+		return exp[0];
+	}
+	
+	var xidx = 0;
+	if (exp[0]=="<<LPAREN>>") xidx = 1;
+	// Remove parens
+	if (exp[exp.length-1]=="<<RPAREN>>") {
+		exp = exp.slice(xidx,exp.length-xidx);
+		xidx = 0;
+	}
+
+	// No optimizations found, so now let's see if there's a binary operator.
+	var binop = -1;
+	xidx = exp.length-1;
+	while (binop==-1 && xidx > 0) {
+		switch (exp[xidx]) {
+			case "<<PLUS>>":
+			case "<<MINUS>>":
+			case "<<TIMES>>":
+			case "<<DIVIDE>>":
+			case "<<POWER>>":
+			case "<<INTDIV>>":
+			case "<<MODULUS>>":
+				binop = xidx;
+		}
+		xidx = xidx - 1;
+	}
+	if (binop > 1) {
+		exp = new Array(evalExp(exp.slice(0,binop)),exp[binop],evalExp(exp.slice(binop+1,exp.length)));
+	}
+	xidx = 0;
+	if (exp[0]=="<<LPAREN>>") xidx = 1;
+	
+	// Rewrite on 17 Aug 2011:
+	// Step 1: Locate opsign
+	// Step 2: If there is more than one element to either the left or right (not including parens), or if there is only one element but
+	// it isn't a number, send the whole side back to evalExp recursively
+	while (xidx < exp.length && exp[xidx]!="<<RPAREN>>") {
+		// functions
+		var fnname = exp[xidx];
+		if (!isNumber(fnname)) {
+			fnname = fnname.toUpperCase();
+			if (fnname=="SIN" && isNumber(exp[xidx+1])) {
+				exp[xidx]="";
+				exp[xidx+1]=Math.sin(parseFloat(exp[xidx+1]));
+				return exp[xidx+1];
+			}
+			if (fnname=="COS" && isNumber(exp[xidx+1])) {
+				exp[xidx]="";
+				exp[xidx+1]=Math.cos(parseFloat(exp[xidx+1]));
+			}
+			if (fnname=="TAN" && isNumber(exp[xidx+1])) {
+				exp[xidx]="";
+				exp[xidx+1]=Math.tan(parseFloat(exp[xidx+1]));
+			}
+			if (fnname=="PI") exp[xidx]=Math.PI;
+			if (fnname=="RND" && exp[xidx+1]!=0) {
+				exp[xidx]=Math.random();
+				lastRandom=exp[xidx];
+			}
+			if (fnname=="RND" && exp[xidx+1]==0) {
+				exp[xidx]="";
+				exp[xidx+1]=lastRandom;
+			}
+			if (fnname=="INT" && isNumber(exp[xidx+1])) {
+				exp[xidx]="";
+				exp[xidx+1]=Math.floor(parseFloat(exp[xidx+1]));
+			}
+			if (fnname=="FIX" && isNumber(exp[xidx+1])) {
+				var sign=1;
+				if (exp[xidx+1]<0) sign=-1;
+				exp[xidx]="";
+				exp[xidx+1]=sign*Math.floor(Math.abs(parseFloat(exp[xidx+1])));
+			}
+			if (fnname=="SGN" && isNumber(exp[xidx+1])) {
+				var sign=1;
+				if (exp[xidx+1]<0) sign=-1;
+				if (exp[xidx+1]==0) sign=-0;
+				exp[xidx]="";
+				exp[xidx+1]=sign;
+			}
+			if (fnname=="ABS" && isNumber(exp[xidx+1])) {
+				exp[xidx]="";
+				exp[xidx+1]=Math.abs(parseFloat(exp[xidx+1]));
+			}
+			if (fnname=="ATN" && isNumber(exp[xidx+1])) {
+				exp[xidx]="";
+				exp[xidx+1]=Math.atan(parseFloat(exp[xidx+1]));
+			}
+			if (fnname=="CINT" && isNumber(exp[xidx+1])) {
+				exp[xidx]="";
+				exp[xidx+1]=Math.ceil(parseFloat(exp[xidx+1]));
+			}
+			if (fnname=="EXP" && isNumber(exp[xidx+1])) {
+				exp[xidx]="";
+				exp[xidx+1]=Math.pow(Math.E,parseFloat(exp[xidx+1]));
+			}
+			if (fnname=="LOG" && isNumber(exp[xidx+1])) {
+				exp[xidx]="";
+				exp[xidx+1]=Math.log(parseFloat(exp[xidx+1]));
+			}
+			if (fnname=="SQR" && isNumber(exp[xidx+1])) {
+				exp[xidx]="";
+				if (exp[xidx+1]==2) exp[xidx+1]=Math.SQRT2;
+				else if (exp[xidx+1]==.5) exp[xidx+1]=Math.SQRT1_2;
+				else exp[xidx+1]=Math.ceil(parseFloat(exp[xidx+1]));
+			}
+		} // No point in checking whether a number is a function
+		// Basic binary operations
+		if (exp[xidx]=="<<PLUS>>" && isNumber(exp[xidx-1]) && isNumber(exp[xidx+1]))
+			return parseFloat(exp[xidx-1])+parseFloat(exp[xidx+1]);
+		if (exp[xidx]=="<<PLUS>>")
+			return exp[xidx-1]+exp[xidx+1]; // Concatenate
+		if (exp[xidx]=="<<MINUS>>" && isNumber(exp[xidx-1]) && isNumber(exp[xidx+1]))
+			return parseFloat(exp[xidx-1])-parseFloat(exp[xidx+1]);
+		if (exp[xidx]=="<<TIMES>>" && isNumber(exp[xidx-1]) && isNumber(exp[xidx+1]))
+			return parseFloat(exp[xidx-1])*parseFloat(exp[xidx+1]);
+		if (exp[xidx]=="<<DIVIDE>>" && isNumber(exp[xidx-1]) && isNumber(exp[xidx+1])) {
+			if (exp[xidx+1]==0) {
+				lastError = "? Divide by zero";
+			}
+			return parseFloat(exp[xidx-1])/parseFloat(exp[xidx+1]); // Returns infinity when denominator = 0
+		}
+		if (exp[xidx]=="<<POWER>>" && isNumber(exp[xidx-1]) && isNumber(exp[xidx+1])) 
+			return Math.pow(parseFloat(exp[xidx-1]),parseFloat(exp[xidx+1]));
+		if (exp[xidx]=="<<INTDIV>>" && isNumber(exp[xidx-1]) && isNumber(exp[xidx+1])) {
+			if (exp[xidx+1]==0) {
+				lastError = "? Divide by zero";
+			}
+			return Math.floor(Math.round(parseFloat(exp[xidx-1]))/Math.round(parseFloat(exp[xidx+1]))); // Returns infinity when denominator = 0
+		}
+		if (exp[xidx]=="<<MODULUS>>" && isNumber(exp[xidx-1]) && isNumber(exp[xidx+1])) {
+			if (exp[xidx+1]==0) {
+				lastError = "? Divide by zero";
+			}
+			return Math.floor(Math.round(parseFloat(exp[xidx-1]))%Math.round(parseFloat(exp[xidx+1]))); // Returns infinity when modulus = 0			
+		}
+		// Comparitive operations (-1 = true, 0=false)
+		
+		// bitwise operations
+		
+		// logical operations
+		
+		xidx++;
+	}
+	if (exp[0]=="") return exp.slice(1,exp.length);
+	return exp;
+} // evaluate an Expression
+function parseLine(line,ta) {
+	var allLines = new Array();
+	var thisLine = new Array();
+	var litstrings = new Array();
+	
+	// Step 1: Isolate all literal strings
+	strline = line;
+	epos = -1;
+	cpos = strline.indexOf("\"");
+	while (cpos > 0) {
+		epos = strline.substring(cpos+1).indexOf("\"")+cpos+1;
+		if (epos > cpos) {
+			litstrings.push(strline.substring(cpos+1,epos));
+			cpos = line.indexOf("\""+litstrings[litstrings.length-1]+"\"");
+			therest = line.substring(epos+1);
+			thefirst = line.substring(0,cpos);
+			line = thefirst+"<<STR"+(litstrings.length-1)+">>"+therest;
+		}
+		//strline = strline.substring(epos+1);
+		strline = line;
+		cpos = strline.indexOf("\"");
+	}
+	// Step 2: If one line has multiple commands, separate them out.
+	strline = line;
+	cpos = strline.indexOf(":");
+	while (cpos > 0) {
+		allLines.push(strline.substring(0,cpos));
+		strline = strline.substring(cpos+1);
+		cpos = strline.indexOf(":");	
+	}
+	allLines.push(strline);
+	// Step 3: Tokenize a command
+
+	for (var i=0;i<allLines.length;i++) {
+		strline = allLines[i];
+		thisLine = new Array();
+		cpos = strline.indexOf(" ");
+		while (cpos > 0) {
+			thisLine.push(strline.substring(0,cpos));
+			strline = strline.substring(cpos+1);
+			cpos = strline.indexOf(" ");
+		}
+		thisLine.push(strline);
+		for (var j=0;j<thisLine.length;j++) {
+			cpos = thisLine[j].indexOf(";");
+			if (cpos >= 0 && cpos < thisLine[j].length-1) {
+				if (j < thisLine.length-1)
+					thisLine.splice(j+1,0,"<<CONCAT>>",thisLine[j].substring(cpos+1));
+				else {
+					thisLine.push("<<CONCAT>>");
+					thisLine.push(thisLine[j].substring(cpos+1));
+				}
+				if (cpos > 0)
+					thisLine[j] = thisLine[j].substring(0,cpos);
+			} else if (cpos >= 0 && thisLine[j].length==1) {
+				thisLine[j] = "<<CONCAT>>";
+			} else if (cpos==thisLine[j].length-1) {
+				thisLine.push("<<NONEWLINE>>");
+				thisLine[j]=thisLine[j].substring(0,thisLine[j].length-1);
+			}
+		}
+		for (var j=0;j<thisLine.length;j++) {
+			cpos = thisLine[j].indexOf(",");
+			if (cpos >= 0 && cpos < thisLine[j].length-1) {
+				if (j < thisLine.length-1)
+					thisLine.splice(j+1,0,"<<COMMA>>",thisLine[j].substring(cpos+1));
+				else {
+					thisLine.push("<<COMMA>>");
+					thisLine.push(thisLine[j].substring(cpos+1));
+				}
+				if (cpos > 0)
+					thisLine[j] = thisLine[j].substring(0,cpos);
+			} else if (cpos >=0 && thisLine[j].length==1) {
+				thisLine[j] = "<<COMMA>>";
+			} else if (cpos==thisLine[j].length-1) {
+				thisLine.push("<<COMMA>>");			
+				thisLine[j]=thisLine[j].substring(0,thisLine[j].length-1);
+			}
+			
+		}
+		
+		var arrjump=0;
+		for (var j=0;j<thisLine.length;j++) {
+			if (trim(thisLine[j]).toUpperCase()=="MOD") 
+				thisLine[j]="<<MODULUS>>";
+			cpos = thisLine[j].indexOf(">=");
+			if (cpos >= 0 && thisLine[j].length==2)
+				thisLine[j]="<<GREQ>>";
+			else if (cpos >= 0) {
+				thisLine.splice(j+1,0,"<<GREQ>>",thisLine[j].substring(cpos+2));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			}
+			cpos = thisLine[j].indexOf("<=");
+			if (cpos >=0 && thisLine[j].length==2)
+				thisLine[j]="<<LTEQ>>";
+			else if (cpos >= 0) {
+				thisLine.splice(j+1,0,"<<LTEQ>>",thisLine[j].substring(cpos+2));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			}
+			cpos = thisLine[j].indexOf("<>");
+			if (cpos >= 0 && thisLine[j].length==2)
+				thisLine[j]="<<NEQ>>";
+			else if (cpos >= 0) {
+				thisLine.splice(j+1,0,"<<NEQ>>",thisLine[j].substring(cpos+2));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			}
+			cpos = thisLine[j].indexOf(">");
+			rpos = thisLine[j].indexOf(">>");
+			if (cpos >= 0 && thisLine[j].length==1)
+				thisLine[j]="<<GTHAN>>";
+			else if (cpos >= 0 && cpos!=rpos) {
+				thisLine.splice(j+1,0,"<<GTHAN>>",thisLine[j].substring(cpos+1));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			}
+			cpos = thisLine[j].indexOf("<");
+			rpos = thisLine[j].indexOf("<<");
+			if (cpos >= 0 && thisLine[j].length==1)
+				thisLine[j]="<<LTHAN>>";
+			else if (cpos >= 0 && cpos!=rpos) {
+				thisLine.splice(j+1,0,"<<LTHAN>>",thisLine[j].substring(cpos+1));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			}
+			cpos = thisLine[j].indexOf("=");
+			if (cpos >= 0 && thisLine[j].length==1) 
+				thisLine[j]="<<EQUALS>>";
+			else if (cpos >= 0) {
+				thisLine.splice(j+1,0,"<<EQUALS>>",thisLine[j].substring(cpos+1));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			}
+			cpos = thisLine[j].indexOf("(");
+			if (cpos >= 0 && thisLine[j].length==1)
+				thisLine[j]="<<LPAREN>>";
+			else if (cpos > 0) {
+				thisLine.splice(j+1,0,"<<LPAREN>>",thisLine[j].substring(cpos+1));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			} else if (cpos == 0) {
+				thisLine.splice(j+1,0,thisLine[j].substring(cpos+1));
+				thisLine[j]="<<LPAREN>>";
+				arrjump++;
+			}
+			cpos = thisLine[j].indexOf(")");
+			if (cpos >= 0 && thisLine[j].length==1)
+				thisLine[j]="<<RPAREN>>";
+			else if (cpos > 0) {
+				thisLine.splice(j+1,0,"<<RPAREN>>",thisLine[j].substring(cpos+1));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			} else if (cpos == 0) {
+				thisLine.splice(j+1,0,thisLine[j].substring(cpos+1));
+				thisLine[j]="<<RPAREN>>";
+				arrjump++;
+			}
+			cpos = thisLine[j].indexOf("+");
+			if (cpos >= 0 && thisLine[j].length==1)
+				thisLine[j]="<<PLUS>>";
+			else if (cpos >= 0) {
+				thisLine.splice(j+1,0,"<<PLUS>>",thisLine[j].substring(cpos+1));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			}
+			cpos = thisLine[j].indexOf("-");
+			if (cpos >= 0 && thisLine[j].length==1)
+				thisLine[j]="<<MINUS>>";
+			else if (cpos >= 0) {
+				thisLine.splice(j+1,0,"<<MINUS>>",thisLine[j].substring(cpos+1));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			}
+			cpos = thisLine[j].indexOf("*");
+			if (cpos >= 0 && thisLine[j].length==1)
+				thisLine[j]="<<TIMES>>";
+			else if (cpos >= 0) {
+				thisLine.splice(j+1,0,"<<TIMES>>",thisLine[j].substring(cpos+1));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			}
+			cpos = thisLine[j].indexOf("/");
+			if (cpos >= 0 && thisLine[j].length==1)
+				thisLine[j]="<<DIVIDE>>";
+			else if (cpos >= 0) {
+				thisLine.splice(j+1,0,"<<DIVIDE>>",thisLine[j].substring(cpos+1));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			}
+			cpos = thisLine[j].indexOf("^");
+			if (cpos >= 0 && thisLine[j].length==1)
+				thisLine[j]="<<POWER>>";
+			else if (cpos >= 0) {
+				thisLine.splice(j+1,0,"<<POWER>>",thisLine[j].substring(cpos+1));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			}
+			cpos = thisLine[j].indexOf("\\");
+			if (cpos >= 0 && thisLine[j].length==1)
+				thisLine[j]="<<INTDIV>>";
+			else if (cpos >= 0) {
+				thisLine.splice(j+1,0,"<<INTDIV>>",thisLine[j].substring(cpos+1));
+				thisLine[j]=thisLine[j].substring(0,cpos);
+				arrjump++;
+			}
+			// j = j + arrjump;
+		} // for j
+
+		allLines[i] = thisLine;
+	}	
+
+	// Step 4: Variable check (a: allocate a new variable; b: substitute RHS references)
+	var settable = -1;
+	for (var k=0;k<allLines.length;k++) {
+		thisLine = allLines[k];
+		for (var m=0;m<thisLine.length;m++) {
+			strline = thisLine[m];
+			if (strline.toUpperCase()=="IF" || strline.toUpperCase()=="WHILE") 
+				settable = -2;
+			if (settable == -1 && (strline=="<<EQUALS>>" || strline.toUpperCase()=="LET" ||
+				strline.toUpperCase()=="DIM"))
+				settable = m;
+			if (strline.substring(0,5)=="<<STR") {
+				cpos = strline.substring(5,strline.length-2);
+				thisLine[m]=litstrings[cpos];
+			} else if (strline.toUpperCase() in dataObjects) {
+				if (settable<0 || (thisLine[settable]=="<<EQUALS>>" && settable<m) ||
+					(settable==0 && m>2))
+					thisLine[m] = dataObjects[thisLine[m].toUpperCase()];
+				else {
+				
+				}
+			} 
+		}
+		// Step 5a: Evaluate parentheticals first
+		idx = 0;
+		lparen = new Array();
+		while (idx < thisLine.length) {
+			if (thisLine[idx]=="<<LPAREN>>")
+				lparen.push(idx);
+			if (thisLine[idx]=="<<RPAREN>>") {
+				if (lparen.length==0) {
+					lastError = "? Mismatched parentheses";
+					allLines[k] = thisLine;
+					return allLines;
+				} // MISMATCHED PARENTHESES ERROR
+				lpidx = lparen.pop();
+				result = evalExp(thisLine.slice(lpidx,idx+1));
+				if (lastError.length>0) {
+					allLines[k] = thisLine;
+					return allLines;
+				}
+				thisLine.splice(lpidx,idx-lpidx+1,result);
+				if (lparen.length==0)
+					idx = -1;
+				else
+					idx = lparen[lparen.length-1];
+			}
+			idx++;
+		}
+		
+		// TO DO: This actually has to move until after step 5.
+		// TO DO: Type checking
+		if (settable>=0) {
+			if (thisLine[settable].toUpperCase()=="LET") {
+				if (thisLine[settable+2].toUpperCase()=="<<EQUALS>>") {
+					dataObjects[thisLine[settable+1].toUpperCase()]=thisLine[settable+3];
+				}
+			} else if (thisLine[settable].toUpperCase()=="<<EQUALS>>") {
+			
+			} else if (thisLine[settable].toUpperCase()=="DIM") {
+			
+			} else {}// We have a problem.
+		}
+		allLines[k] = thisLine;
+	}
+	
+	// Step 5: Evaluate expressions
+	
+	// Step 6: Concatenate
+	
+	return allLines;
+} // parseLine
+function executeCommand(line, ta) {
+	var allLines;
+	if (line instanceof Array) allLines = line;
+	else allLines = parseLine(line,ta);
+	var keyword,nextword;
+	for (var l=lastInstructionLine+1;l<allLines.length;l++) {
+		// nextword=allLines[l].substring(0,allLines[l].indexOf(" ")-1);
+		keyword=allLines[l][0].toUpperCase();
+		if (keyword.length==0) keyword=allLines[l];
+//		ta.value = ta.value+"\n"+keyword;
+		if (keyword.substring(0,1)=="'") return true; // Comment
+		if (keyword=="CLS") {
+			ta.value = "";
+		} else if (keyword=="REM") {
+			return true; // Comment
+		} else if (keyword=="LET") {
+			// already handled in parseLine()
+			ta.value = ta.value + "\nData objects:\n";
+			for (var key in dataObjects)
+				ta.value = ta.value + "Key: "+key+" Value: "+dataObjects[key]+"\n";
+		} else if (keyword=="NEW") {
+			runMode=0; // 0 for interactive, 1 for scripted
+			currentCode=new Array();
+			dataObjects=new Array();
+			instructionPointer=0;
+			lastInstructionLine=-1;
+			instructionStack=new Array();
+		} else if (keyword=="END") {
+			runMode=0;
+		} else if (keyword=="PRINT" || keyword=="?" || keyword.substring(0,1)=="?") {
+			if (runMode==0 && navigator.userAgent.indexOf("Firefox")>0)
+				ta.value = ta.value + "\n"; // Firefox does not "display" the last key pressed, IE does.
+			for (var n=1;n<allLines[l].length;n++)
+				ta.value = ta.value + allLines[l][n];
+			ta.value = ta.value + "\n";
+		} else if (keyword=="INPUT") {
+			inputVar = allLines[l][1];
+			ta.value = ta.value + "\ninputVar: "+inputVar+"\n";
+			buffer = "";
+			return true;
+		} else if (keyword=="LIST") {
+			if (runMode==0 && navigator.userAgent.indexOf("Firefox")>0)
+				ta.value = ta.value + "\n"; // Firefox does not "display" the last key pressed, IE does.
+			for (var n in currentCode) {
+/* We are not parsing the line on entry anymore.
+				for (var m=0;m<currentCode[n].length;m++) {
+					ta.value = ta.value + n + " "
+					for (var o=0;o<currentCode[n][m].length;o++)
+						ta.value = ta.value + currentCode[n][m][o] + " ";
+					if (m<currentCode[n].length-1)
+						ta.value = ta.value + ":";
+				}
+*/	
+				ta.value = ta.value + n + " " + currentCode[n];
+				ta.value = ta.value + "\n";
+			}
+		} else if (keyword=="IF") {
+			if (allLines[l][1]==0) {
+				// Find else
+			} else {
+				// Process commands until else
+			}
+		} else if (keyword=="ON") {
+		
+		} else {
+			lastError = "? Syntax Error: "+keyword;
+		}
+		lastInstructionLine = l;
+	} // for each command in the line
+	if (lastError.length>0) return false;
+	return true; // No error
+} // executeCommand
+function updateCurrentCode(nmbr,line,ta) {
+	currentCode[nmbr] = line;
+	if (nmbr > highestLineNumber) highestLineNumber=nmbr;
+	return true;
+} // updateCurrentCode
+function runProgram1(ta) {
+	var numberlist = new Array();
+	var lastIP = 0;
+	if (currentCode.length==0) {
+		ta.value = ta.value + "\nOK\n";
+		return true;
+	}
+	for (var n in currentCode) {
+		numberlist.push(n);
+	}
+	numberlist.sort(); // Javascript doesn't guarantee the order of associative indices.
+	for (var ip=0;ip<numberlist.length;ip++) {
+		if (lastIP==instructionPointer)
+			instructionPointer=numberlist[ip];
+		lastIP = instructionPointer;
+		// ta.value = ta.value + "Running line "+instructionPointer+"\n";
+		if (!executeCommand(currentCode[instructionPointer],ta)) {
+			lastError = lastError + " in line "+instructionPointer;
+			return false;
+		}
+		if (lastIP!=instructionPointer)
+			ip = numberlist.indexOf(instructionPointer)-1;
+	}
+	return true;
+}
+function runProgram(ta) {
+	var blocked=false;
+	var thisip = instructionPointer;
+	while (!blocked && runMode>0) {
+		while (currentCode[instructionPointer]==undefined && instructionPointer<=highestLineNumber) {
+			instructionPointer++;
+			thisip = instructionPointer;
+		}
+		if (instructionPointer > highestLineNumber) {
+			runMode = 0;
+			return true;
+		}
+		if (!executeCommand(currentCode[instructionPointer],ta)) {
+			lastError = lastError + " in line "+instructionPointer;
+			return false;
+		}
+		if (inputVar.length>0) {
+			blocked=true;
+		} else {
+			if (thisip == instructionPointer) {
+				// No goto or gosub applied
+				instructionPointer++;
+				lastInstructionLine = -1;
+			}
+		}
+	}
+} // runProgram()
+
+function parseScreen(ta,scrn) {
+	var status=false;
+	if (inputVar.length>0) {
+		ta.value = ta.value + "Buffer: " + buffer + "\n";
+		dataObjects[inputVar] = buffer;
+		inputVar = "";
+		if (runMode==1) {
+			status = runProgram(ta);
+		}
+		if (lastError.length>0 || status==false) {
+			ta.value = ta.value + "\n"+lastError+"\n";
+			return false;
+		}
+		return true;
+	}
+	var lastline=scrn.substring(scrn.lastIndexOf("\n")+1);
+ 	var inst=document.getElementById("instructions");
+	var firstword=lastline.substring(0,lastline.indexOf(" "));
+	if (firstword.length==0) firstword=lastline;
+	if (isNumber(firstword)) {
+		status=updateCurrentCode(parseFloat(firstword),lastline.substring(lastline.indexOf(" ")+1),ta);
+		ta.value = ta.value + "\n";
+	} else if (firstword.toUpperCase()=="RUN") {
+		thisLine = parseLine(lastline,ta);
+		if (thisLine.length>1 && isNumber(thisLine[1]))
+			instructionPointer=parseFloat(thisLine[1]);
+		if (thisLine.length>1 && (thisLine[1].toUpperCase()=="R" || thisLine[2].toUpperCase()=="R" || 
+			thisLine[3].toUpperCase()=="R")) {
+			// Retain existing file pointers
+		} else {
+			// Close all open files
+			// Clear runtime memory
+			var dataObjects=new Array();
+			lastError="";
+			// Stop any playing media
+			// Set PEN and STRIG to OFF
+		}
+		runMode = 1;
+		status = runProgram(ta);
+		if (status==false)
+			ta.value = ta.value + "\n"+lastError+"\n";
+		runMode = 0;
+	} else {
+		status=executeCommand(lastline,ta);
+		if (status) {
+			ta.value = ta.value + "\n"+lastError+"OK\n";
+			lastError = "";
+		} else {
+			ta.value = ta.value + "\n"+lastError+"\n";
+			lastError = "";
+		}
+	}
+	ta.focus();
+	return true;
+} // parseScreen
+
+function onEnter(ta,e) {
+	var screen = ta.value;
+	var status = true;
+	var chr;
+	if (!e) e=window.event;
+	if (isNumber(e.keyCode)) chr=e.keyCode;
+	else if (isNumber(e.which)) chr=e.which;
+	if (e.ctrlKey && chr>=65 && chr<=90) chr=chr-64;
+	if (!e.shiftKey && chr>=65 && chr<=90) chr=chr+32;
+	if (e.shiftKey) {
+		switch(chr) {
+			case 48: chr=41; break; // shift-0 = )
+			case 49: chr=33; break; // shift-1 = !
+			case 50: chr=64; break; // shift-2 = @
+			case 51: chr=35; break; // shift-3 = #
+			case 52: chr=36; break; // shift-4 = $
+			case 53: chr=37; break; // shift-5 = %
+			case 54: chr=94; break; // shift-6 = ^
+			case 55: chr=38; break; // shift-7 = &
+			case 56: chr=39; break; // shift-8 = *
+			case 57: chr=40; break; // shift-9 = (
+		}
+	}
+	if (chr==13) {
+		if (parseScreen(ta,trim(screen))) {
+		} else {
+			ta.value = ta.value + "\n? Unknown Error in Execution\n";
+		}
+		status = false;
+	}
+	if (runMode<2 && chr==3) {
+		runMode = 0;
+		buffer = "";
+		ta.value = ta.value + "^C\n";
+	}
+	else if (inputVar.length>0) buffer = buffer + String.fromCharCode(chr);
+	screen = ta.value;
+	while (screen.split("\n").length>ta.rows) {
+		screen = screen.substring(screen.indexOf("\n")+1);
+	}
+	ta.value = screen;
+	return status;
+} // onEnter
+
+</SCRIPT>
+<NOSCRIPT>Browser BASIC requires Javascript in order to run.<BR /></NOSCRIPT>
+<DIV id="banner" style="background:#fda321;color:#494949;">
+Browser BASIC is sponsored and provided by <b><a href="http://hickoryservices.com">HickoryServices.com</a></b>.<br />
+</DIV>
+<DIV id="instructions">
+</DIV>
+<DIV name="vmachine" id="vmachine">
+<CENTER>
+<TEXTAREA id="ta" style="background:black;color:white;font-family:Courier,monospace;" cols="80" rows="25"
+spellcheck="false" onKeyDown="return onEnter(this,event);">
+Browser Basic Dev 20110830A
+Ready
+</TEXTAREA><BR />
+</CENTER>
+</DIV>
+<DIV id="footer">
+</DIV>
+<SCRIPT type="text/javascript" lang="javascript">
+var itemtofocus = document.getElementById("ta");
+itemtofocus.focus();
+</SCRIPT>
+</BODY>
+</HTML>
